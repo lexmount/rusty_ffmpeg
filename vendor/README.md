@@ -1,12 +1,13 @@
-# Bundled Linux H.264 sources
+# Bundled H.264 sources
 
 `ffmpeg-8.1.3-h264.tar.xz` contains the upstream FFmpeg build files and the
 source trees for libavcodec, libavformat, libavutil, and libswscale. Licensing
 notices are included in the archive. The `bundled_h264` feature builds these
 libraries statically with only the H.264 decoder and parser and the MOV/MP4
 demuxer enabled. The build has no FFmpeg network protocols or hardware
-accelerators. Linux builds require a C toolchain, Make, tar, and xz. NASM is
-optional on x86.
+accelerators. Builds require a C toolchain, Make, and tar with xz support. NASM
+is optional on x86. The macOS build uses libclang from Xcode to generate the
+bindings for the target SDK.
 
 Recreate the archive from the official release.
 

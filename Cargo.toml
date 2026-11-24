@@ -34,7 +34,7 @@ vcpkg = { version = "0.2", optional = true }
 pkg-config = "0.3"
 
 [features]
-# Build the vendored Linux H.264/MP4 software decoding subset.
+# Build the vendored H.264/MP4 software decoding subset on Linux and macOS.
 bundled_h264 = ["dep:cc", "ffmpeg8_1", "use_prebuilt_binding"]
 # Probe and link FFmpeg with pkg-config
 link_system_ffmpeg = []

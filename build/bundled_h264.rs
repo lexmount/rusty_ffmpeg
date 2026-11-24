@@ -1,12 +1,12 @@
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::{env, fs};
 
 const VERSION: &str = "8.1.3";
 const LIBRARIES: [&str; 4] = ["avformat", "avcodec", "swscale", "avutil"];
 
-pub fn link(out_dir: &Path) {
+pub fn link(out_dir: &Path, target_os: &str) -> (PathBuf, PathBuf) {
     let archive = format!("vendor/ffmpeg-{VERSION}-h264.tar.xz");
     println!("cargo:rerun-if-changed={archive}");
     println!("cargo:rerun-if-env-changed=NASM");
@@ -19,6 +19,7 @@ pub fn link(out_dir: &Path) {
         .arg("-C")
         .arg(out_dir));
 
+    let source_dir = out_dir.join(format!("ffmpeg-{VERSION}"));
     let build_dir = out_dir.join("ffmpeg-build");
     fs::create_dir_all(&build_dir).expect("create FFmpeg build directory");
     let toolchain = cc::Build::new()
@@ -26,7 +27,7 @@ pub fn link(out_dir: &Path) {
         .debug(false)
         .warnings(false)
         .get_compiler();
-    let mut configure = Command::new(out_dir.join(format!("ffmpeg-{VERSION}/configure")));
+    let mut configure = Command::new(source_dir.join("configure"));
     configure.current_dir(&build_dir).args([
         "--disable-everything",
         "--disable-programs",
@@ -50,17 +51,24 @@ pub fn link(out_dir: &Path) {
         "--extra-cflags={}",
         toolchain.cflags_env().to_string_lossy()
     ));
+    let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
     if env::var_os("HOST") != env::var_os("TARGET") {
         configure
             .arg("--enable-cross-compile")
-            .arg("--target-os=linux")
-            .arg(format!(
-                "--arch={}",
-                env::var("CARGO_CFG_TARGET_ARCH").unwrap()
-            ));
+            .arg(format!("--target-os={target_os}"))
+            .arg(format!("--arch={target_arch}"));
+        if target_os == "darwin" {
+            // FFmpeg forwards the compiler flags to the assembler. Its
+            // separate link probes also need the target architecture.
+            let arch = match target_arch.as_str() {
+                "aarch64" => "arm64",
+                arch => arch,
+            };
+            configure.arg(format!("--extra-ldflags=-arch {arch}"));
+        }
     }
     let assembler = env::var_os("NASM").unwrap_or_else(|| "nasm".into());
-    if env::var("CARGO_CFG_TARGET_ARCH").is_ok_and(|arch| arch == "x86" || arch == "x86_64") {
+    if matches!(target_arch.as_str(), "x86" | "x86_64") {
         if Command::new(&assembler)
             .arg("-v")
             .output()
@@ -93,18 +101,21 @@ pub fn link(out_dir: &Path) {
     for library in LIBRARIES {
         let key = format!("EXTRALIBS-{library}=");
         if let Some(flags) = config.lines().find_map(|line| line.strip_prefix(&key)) {
-            dependencies.extend(flags.split_whitespace().filter_map(|flag| {
-                if flag == "-pthread" {
-                    Some("pthread")
-                } else {
-                    flag.strip_prefix("-l")
-                }
-            }));
+            let mut flags = flags.split_whitespace();
+            while let Some(flag) = flags.next() {
+                let dependency = match flag {
+                    "-pthread" => Some(("", "pthread")),
+                    "-framework" => flags.next().map(|name| ("framework=", name)),
+                    flag => flag.strip_prefix("-l").map(|name| ("", name)),
+                };
+                dependencies.extend(dependency);
+            }
         }
     }
-    for library in dependencies {
-        println!("cargo:rustc-link-lib={library}");
+    for (kind, library) in dependencies {
+        println!("cargo:rustc-link-lib={kind}{library}");
     }
+    (source_dir, build_dir)
 }
 
 fn run(command: &mut Command) {

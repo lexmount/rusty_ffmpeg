@@ -227,11 +227,11 @@ fn use_prebuilt_binding(from: &Path, to: &Path) {
     fs::copy(from, to).expect("Prebuilt binding file failed to be copied.");
 }
 
-fn generate_bindings(ffmpeg_include_dir: &Path, headers: &[PathBuf]) -> Bindings {
-    if !Path::new(ffmpeg_include_dir).exists() {
-        panic!(
-            "FFmpeg include dir: `{:?}` doesn't exits",
-            ffmpeg_include_dir
+fn generate_bindings(ffmpeg_include_dirs: &[&Path], headers: &[PathBuf]) -> Bindings {
+    for dir in ffmpeg_include_dirs {
+        assert!(
+            dir.is_dir(),
+            "FFmpeg include directory {dir:?} does not exist"
         );
     }
     // Because of the strange `FP_*` in `math.h` https://github.com/rust-lang/rust-bindgen/issues/687
@@ -250,13 +250,11 @@ fn generate_bindings(ffmpeg_include_dir: &Path, headers: &[PathBuf]) -> Bindings
     // Bindgen on all avaiable headers
     headers
         .iter()
-        .map(|header| ffmpeg_include_dir.join(header))
-        .filter(|path| {
-            let exists = Path::new(&path).exists();
-            if !exists {
-                eprintln!("Header path `{:?}` not found.", path);
-            }
-            exists
+        .filter_map(|header| {
+            ffmpeg_include_dirs
+                .iter()
+                .map(|dir| dir.join(header))
+                .find(|path| path.is_file())
         })
         .fold(
             {
@@ -266,7 +264,7 @@ fn generate_bindings(ffmpeg_include_dir: &Path, headers: &[PathBuf]) -> Bindings
                     .rust_target(RustTarget::stable(68, 0).ok().unwrap())
                     .parse_callbacks(Box::new(filter_callback))
                     // Add clang path, for `#include` header finding in bindgen process.
-                    .clang_arg(format!("-I{}", ffmpeg_include_dir))
+                    .clang_args(ffmpeg_include_dirs.iter().map(|dir| format!("-I{dir}")))
                     // Workaround: https://github.com/rust-lang/rust-bindgen/issues/2159
                     .blocklist_type("__mingw_ldbl_type_t")
                     // Stop bindgen from prefixing enums
@@ -398,7 +396,7 @@ mod vcpkg_linking {
         if let Some(ffmpeg_binding_path) = env_vars.ffmpeg_binding_path.as_ref() {
             use_prebuilt_binding(ffmpeg_binding_path, output_binding_path);
         } else {
-            generate_bindings(&include_paths[0], &HEADERS)
+            generate_bindings(&[&include_paths[0]], &HEADERS)
                 .write_to_file(output_binding_path)
                 .expect("Cannot write binding to file.");
         }
@@ -435,7 +433,7 @@ fn dynamic_linking(env_vars: EnvVars) {
     if let Some(ffmpeg_binding_path) = env_vars.ffmpeg_binding_path.as_ref() {
         use_prebuilt_binding(ffmpeg_binding_path, output_binding_path);
     } else if let Some(ffmpeg_include_dir) = env_vars.ffmpeg_include_dir.as_ref() {
-        generate_bindings(ffmpeg_include_dir, &HEADERS)
+        generate_bindings(&[ffmpeg_include_dir], &HEADERS)
             // Is it correct to generate binding to one file? :-/
             .write_to_file(output_binding_path)
             .expect("Cannot write binding to file.");
@@ -465,11 +463,11 @@ fn linking(env_vars: EnvVars) {
                 use_prebuilt_binding(ffmpeg_binding_path, output_binding_path);
             } else if let Some(ffmpeg_include_dir) = env_vars.ffmpeg_include_dir.as_ref() {
                 // If use ffmpeg_pkg_config_path with ffmpeg_include_dir, prefer using the user given dir rather than pkg_config_path.
-                generate_bindings(ffmpeg_include_dir, &HEADERS)
+                generate_bindings(&[ffmpeg_include_dir], &HEADERS)
                     .write_to_file(output_binding_path)
                     .expect("Cannot write binding to file.");
             } else {
-                generate_bindings(&include_paths[0], &HEADERS)
+                generate_bindings(&[&include_paths[0]], &HEADERS)
                     .write_to_file(output_binding_path)
                     .expect("Cannot write binding to file.");
             }
@@ -495,7 +493,7 @@ fn linking(env_vars: EnvVars) {
             if let Some(ffmpeg_binding_path) = env_vars.ffmpeg_binding_path.as_ref() {
                 use_prebuilt_binding(ffmpeg_binding_path, output_binding_path);
             } else if let Some(ffmpeg_include_dir) = env_vars.ffmpeg_include_dir.as_ref() {
-                generate_bindings(ffmpeg_include_dir, &HEADERS)
+                generate_bindings(&[ffmpeg_include_dir], &HEADERS)
                     .write_to_file(output_binding_path)
                     .expect("Cannot write binding to file.");
             } else {
@@ -557,7 +555,7 @@ Enable `link_vcpkg_ffmpeg` feature if you want to link ffmpeg libraries installe
             if let Some(ffmpeg_binding_path) = env_vars.ffmpeg_binding_path.as_ref() {
                 use_prebuilt_binding(ffmpeg_binding_path, output_binding_path);
             } else if let Some(ffmpeg_include_dir) = env_vars.ffmpeg_include_dir.as_ref() {
-                generate_bindings(ffmpeg_include_dir, &HEADERS)
+                generate_bindings(&[ffmpeg_include_dir], &HEADERS)
                     .write_to_file(output_binding_path)
                     .expect("Cannot write binding to file.");
             } else {
@@ -603,10 +601,29 @@ fn use_prebuilt_binding_feature(env_vars: &EnvVars) {
 fn main() {
     let env_vars = EnvVars::init();
     #[cfg(feature = "bundled_h264")]
-    if env_vars.docs_rs.is_none() && env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
-        bundled_h264::link(env_vars.out_dir.as_ref().unwrap().as_std_path());
-        use_prebuilt_binding_feature(&env_vars);
-        return;
+    {
+        let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
+        if env_vars.docs_rs.is_none() && matches!(target_os.as_str(), "linux" | "macos") {
+            let out_dir = env_vars.out_dir.as_ref().unwrap();
+            let configure_os = if target_os == "macos" {
+                "darwin"
+            } else {
+                "linux"
+            };
+            let (source, build) = bundled_h264::link(out_dir.as_std_path(), configure_os);
+            if target_os == "macos" {
+                // The prebuilt bindings were generated on Linux. Darwin's
+                // errno values (including decoder backpressure) differ.
+                let source = Path::from_path(&source).unwrap();
+                let build = Path::from_path(&build).unwrap();
+                generate_bindings(&[build, source], &HEADERS)
+                    .write_to_file(out_dir.join("binding.rs"))
+                    .expect("write bundled FFmpeg bindings");
+            } else {
+                use_prebuilt_binding_feature(&env_vars);
+            }
+            return;
+        }
     }
 
     if env_vars.docs_rs.is_some() {
