@@ -8,6 +8,10 @@ mod avutil;
     unnecessary_transmutes,
     clippy::all
 )]
+#[cfg_attr(
+    feature = "bundled_h264",
+    allow(unknown_lints, suspicious_runtime_symbol_definitions)
+)]
 pub mod ffi {
     #[cfg(feature = "ffmpeg6")]
     pub use crate::avutil::channel_layout::*;

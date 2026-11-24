@@ -5,6 +5,10 @@ use camino::Utf8PathBuf as PathBuf;
 use once_cell::sync::Lazy;
 use std::{collections::HashSet, env, fs};
 
+#[cfg(feature = "bundled_h264")]
+#[path = "build/bundled_h264.rs"]
+mod bundled_h264;
+
 /// All the libs that FFmpeg has
 static LIBS: Lazy<[&str; 7]> = Lazy::new(|| {
     [
@@ -598,6 +602,13 @@ fn use_prebuilt_binding_feature(env_vars: &EnvVars) {
 
 fn main() {
     let env_vars = EnvVars::init();
+    #[cfg(feature = "bundled_h264")]
+    if env_vars.docs_rs.is_none() && env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
+        bundled_h264::link(env_vars.out_dir.as_ref().unwrap().as_std_path());
+        use_prebuilt_binding_feature(&env_vars);
+        return;
+    }
+
     if env_vars.docs_rs.is_some() {
         docs_rs_linking(env_vars);
     } else if env_vars.ffmpeg_dll_path.is_some() {
